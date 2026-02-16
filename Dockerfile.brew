@@ -1,0 +1,101 @@
+FROM node:22-bookworm
+
+USER root
+
+# ==================================================
+# PARTE 1: Instalações base (do Dockerfile oficial)
+# ==================================================
+
+# Instalar Bun (necessário para build scripts)
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+
+RUN corepack enable
+
+# ==================================================
+# PARTE 2: Adicionar Homebrew (CUSTOMIZAÇÃO)
+# ==================================================
+
+# Instalar dependências do Homebrew
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    file \
+    git \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Criar diretório do Homebrew com ownership node
+RUN mkdir -p /home/linuxbrew/.linuxbrew && \
+    chown -R node:node /home/linuxbrew
+
+# Criar diretório npm global
+RUN mkdir -p /home/node/.npm-global && \
+    chown -R node:node /home/node/.npm-global
+
+# Instalar Homebrew como usuário node
+USER node
+RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Configurar npm prefix
+RUN npm config set prefix '/home/node/.npm-global'
+
+# Adicionar ao PATH permanentemente
+ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.npm-global/bin:${PATH}"
+
+# Pré-instalar ferramentas CLI comuns (GitHub CLI é uma das mais usadas)
+RUN brew install gh && brew cleanup
+
+# ==================================================
+# PARTE 3: Build do OpenClaw (do Dockerfile oficial)
+# ==================================================
+
+# Voltar para root para build
+USER root
+
+WORKDIR /app
+
+# Suporte para pacotes APT extras via build arg
+ARG OPENCLAW_DOCKER_APT_PACKAGES=""
+RUN if [ -n "$OPENCLAW_DOCKER_APT_PACKAGES" ]; then \
+      apt-get update && \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $OPENCLAW_DOCKER_APT_PACKAGES && \
+      apt-get clean && \
+      rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
+    fi
+
+# Otimização: copiar arquivos de dependência primeiro para cache de layer
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY ui/package.json ./ui/package.json
+COPY patches ./patches
+COPY scripts ./scripts
+
+# Instalar dependências
+RUN pnpm install --frozen-lockfile
+
+# Copiar todo o código fonte
+COPY . .
+
+# Build do OpenClaw
+RUN OPENCLAW_A2UI_SKIP_MISSING=1 pnpm build
+
+# Build da UI (forçar pnpm para compatibilidade ARM)
+ENV OPENCLAW_PREFER_PNPM=1
+RUN pnpm ui:install
+RUN pnpm ui:build
+
+ENV NODE_ENV=production
+
+# ==================================================
+# PARTE 4: Configuração final
+# ==================================================
+
+# Rodar como usuário node por segurança
+USER node
+
+# Instalar clawhub globalmente
+RUN npm install -g clawhub
+
+# Comando padrão (do oficial)
+CMD ["node", "dist/index.js"]
